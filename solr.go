@@ -69,9 +69,12 @@ type solrSelectResponse struct {
 }
 
 func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID string, page, size int) (total int64, hits []SearchHit, err error) {
+	luceneQ := buildContainsQuery(q)
 	params := url.Values{}
 	params.Set("wt", "json")
-	params.Set("q", q)
+	// Leading wildcards required for "contains" (*term*).
+	params.Set("q", "{!lucene allowLeadingWildcard=true v=$byzq}")
+	params.Set("byzq", luceneQ)
 	params.Set("start", strconv.Itoa(page*size))
 	params.Set("rows", strconv.Itoa(size))
 	params.Set("fl", "id,title,content,organization_id,tenant_id,user_id,source,path,tags,score")

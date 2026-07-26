@@ -33,6 +33,9 @@ func main() {
 		maxSize = defaultMaxSize
 	}
 
+	logs := NewLogBuffer()
+	teeStdLog(logs, "byz-search")
+
 	solr := NewSolrClient(solrURL, collection)
 	publisher, err := NewKafkaPublisher(splitCSV(kafkaBootstrap), kafkaEnabled, searchTopic)
 	if err != nil {
@@ -72,10 +75,25 @@ func main() {
 		handleSearch(w, r, solr, publisher, maxSize)
 	})))
 
+	mux.HandleFunc("/api/v1/admin/logs", withCORS(withJWT(jwks, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		lines := 200
+		if v := r.URL.Query().Get("lines"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				lines = n
+			}
+		}
+		writeJSON(w, http.StatusOK, logs.Tail(lines, r.URL.Query().Get("level")))
+	})))
+
 	addr := bind + ":" + port
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		log.Printf("byz-search listening on http://%s solr=%s/%s kafka=%v", addr, solrURL, collection, kafkaEnabled)
+		logs.Add("INFO", "byz-search", "listening on "+addr, nil)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http: %v", err)
 		}
@@ -127,15 +145,25 @@ func handleSearch(w http.ResponseWriter, r *http.Request, solr *SolrClient, pub 
 		size = maxSize
 	}
 
-	// Optional tenant filter: only honor if token has tenant_id, or allow explicit
-	// tenant query param when it matches token tenant (never cross-tenant).
-	tenantFilter := claims.TenantID
+	// Tenant filter is opt-in via query param only. Admin uploads often have
+	// null tenant_id; auto-filtering by JWT tenant would hide those docs.
+	tenantFilter := ""
 	if v := strings.TrimSpace(r.URL.Query().Get("tenantId")); v != "" {
 		if claims.TenantID != "" && v != claims.TenantID {
 			writeErr(w, errForbidden("tenantId does not match token"))
 			return
 		}
 		tenantFilter = v
+	}
+
+	orgID := claims.OrganizationID
+	if v := strings.TrimSpace(r.URL.Query().Get("organizationId")); v != "" {
+		adminOrg := strings.TrimSpace(env("BYZ_ADMIN_ORGANIZATION_ID", ""))
+		if adminOrg != "" && claims.OrganizationID != adminOrg {
+			writeErr(w, errForbidden("organizationId override requires platform admin org"))
+			return
+		}
+		orgID = v
 	}
 
 	requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
@@ -145,7 +173,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request, solr *SolrClient, pub 
 	w.Header().Set("X-Request-Id", requestID)
 
 	started := time.Now()
-	total, hits, err := solr.Search(r.Context(), q, claims.OrganizationID, tenantFilter, page, size)
+	total, hits, err := solr.Search(r.Context(), q, orgID, tenantFilter, page, size)
 	durationMs := time.Since(started).Milliseconds()
 	if err != nil {
 		log.Printf("solr search: %v", err)
@@ -154,7 +182,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request, solr *SolrClient, pub 
 			Type:           "search.query",
 			OccurredAt:     time.Now().UTC().Format(time.RFC3339Nano),
 			RequestID:      requestID,
-			OrganizationID: claims.OrganizationID,
+			OrganizationID: orgID,
 			TenantID:       tenantFilter,
 			UserID:         claims.UserID,
 			ClientID:       claims.ClientID,
@@ -188,7 +216,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request, solr *SolrClient, pub 
 		Type:           "search.query",
 		OccurredAt:     time.Now().UTC().Format(time.RFC3339Nano),
 		RequestID:      requestID,
-		OrganizationID: claims.OrganizationID,
+		OrganizationID: orgID,
 		TenantID:       tenantFilter,
 		UserID:         claims.UserID,
 		ClientID:       claims.ClientID,

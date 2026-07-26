@@ -71,16 +71,29 @@ Create collection `byz` (or set `SOLR_COLLECTION`) with fields:
 
 Example (managed schema via Solr API or configset) — keep names exact so Ingest and Search stay aligned.
 
+## Query behavior
+
+Plain queries are treated as **contains** matches over `title`, `content`, and `path`
+(`*term*`, `allowLeadingWildcard`). Explicit Solr syntax (`*`, `:`, `AND`, …) is passed through.
+
+Optional query params:
+
+| Param | Notes |
+|-------|--------|
+| `tenantId` | Opt-in tenant filter (not applied from JWT by default) |
+| `organizationId` | Platform-admin override when `BYZ_ADMIN_ORGANIZATION_ID` matches token org (or unset in dev) |
+
 ## Analytics
 
 Each search (success or Solr failure) best-effort publishes `search.query` to **`byz.search.query`** (key = `organizationId`).
 
 Contract: `projects/events-service/docs/EVENTS.md`.
 
-## Health
+## Health / admin
 
 - `GET /actuator/health` — UP only if Solr ping succeeds  
 - `GET /healthz` — process liveness (no Solr)
+- `GET /api/v1/admin/logs` — in-memory log tail (JWT; Admin Logs UI)
 
 ## Config
 
