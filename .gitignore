@@ -1,0 +1,6 @@
+/byz-search
+/byz-search.exe
+*.exe
+*.test
+.idea/
+.vscode/
