@@ -69,7 +69,20 @@ type solrSelectResponse struct {
 }
 
 func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID string, page, size int) (total int64, hits []SearchHit, err error) {
-	luceneQ := buildContainsQuery(q)
+	// Prefer code_tokens for path-like queries; if Solr schema lacks the field (400),
+	// retry without it so normal search keeps working.
+	luceneQ := buildContainsQuery(q, true)
+	total, hits, err = s.searchWithQuery(ctx, luceneQ, q, orgID, tenantID, page, size)
+	if err != nil && strings.Contains(err.Error(), "status 400") && strings.Contains(luceneQ, fieldCodeTokens) {
+		fallback := buildContainsQuery(q, false)
+		if fallback != luceneQ {
+			return s.searchWithQuery(ctx, fallback, q, orgID, tenantID, page, size)
+		}
+	}
+	return total, hits, err
+}
+
+func (s *SolrClient) searchWithQuery(ctx context.Context, luceneQ, rawQ, orgID, tenantID string, page, size int) (total int64, hits []SearchHit, err error) {
 	params := url.Values{}
 	params.Set("wt", "json")
 	// Leading wildcards required for "contains" (*term*).
@@ -103,7 +116,7 @@ func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID strin
 		return 0, nil, err
 	}
 	if resp.StatusCode >= 300 {
-		return 0, nil, fmt.Errorf("solr select status %d: %s", resp.StatusCode, truncate(string(body), 300))
+		return 0, nil, fmt.Errorf("solr select status %d: %s", resp.StatusCode, truncate(string(body), 600))
 	}
 
 	var parsed solrSelectResponse
@@ -136,7 +149,7 @@ func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID strin
 			}
 		}
 		if hit.Snippet == "" {
-			hit.Snippet = snippetAround(body, q, 220)
+			hit.Snippet = snippetAround(body, rawQ, 220)
 		}
 		if hit.Snippet == "" {
 			hit.Snippet = truncate(firstNonEmpty(body, title), 220)

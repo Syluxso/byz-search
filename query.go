@@ -7,12 +7,10 @@ import (
 
 const fieldCodeTokens = "code_tokens"
 
-// buildContainsQuery turns a plain user query into a Lucene query that:
-//   - matches word tokens on title/content/path (punctuation-split)
-//   - matches path/API-shaped strings on code_tokens (keeps / { } etc.)
-//
-// Explicit Solr syntax is passed through unchanged.
-func buildContainsQuery(raw string) string {
+// buildContainsQuery turns a plain user query into a Lucene query.
+// When useCodeTokens is false, path/API matching falls back to word tokens only
+// (needed when Solr has not defined the code_tokens field yet).
+func buildContainsQuery(raw string, useCodeTokens bool) string {
 	q := strings.TrimSpace(raw)
 	if q == "" {
 		return "*:*"
@@ -22,10 +20,10 @@ func buildContainsQuery(raw string) string {
 	}
 
 	lower := strings.ToLower(q)
+	pathLike := isPathLikeQuery(lower)
 	parts := make([]string, 0, 8)
 
-	// Path / code shaped: keep punctuation, search multi-valued string field.
-	if isPathLikeQuery(lower) {
+	if useCodeTokens && pathLike {
 		esc := escapeLuceneTerm(lower)
 		if esc != "" {
 			parts = append(parts, fieldCodeTokens+":*"+esc+"*")
@@ -37,18 +35,20 @@ func buildContainsQuery(raw string) string {
 		}
 	}
 
-	// Word tokens from punctuation-split (so "/notifications/{id}" also yields notifications + id).
 	for _, tok := range splitSearchTokens(lower) {
 		esc := escapeLuceneTerm(tok)
 		if esc == "" {
 			continue
 		}
-		parts = append(parts,
-			"(title:*"+esc+"* OR content:*"+esc+"* OR path:*"+esc+"* OR "+fieldCodeTokens+":*"+esc+"*)")
+		clause := "(title:*" + esc + "* OR content:*" + esc + "* OR path:*" + esc + "*"
+		if useCodeTokens && pathLike {
+			clause += " OR " + fieldCodeTokens + ":*" + esc + "*"
+		}
+		clause += ")"
+		parts = append(parts, clause)
 	}
 
 	if len(parts) == 0 {
-		// Fallback: whole string as contains on analyzed fields.
 		esc := escapeLuceneTerm(lower)
 		if esc == "" {
 			return "*:*"
@@ -56,9 +56,7 @@ func buildContainsQuery(raw string) string {
 		return "(title:*" + esc + "* OR content:*" + esc + "* OR path:*" + esc + "*)"
 	}
 
-	// Path-like queries: prefer code_tokens match OR all word parts (OR, not AND),
-	// so "/notifications/{id}" hits the path token without requiring every segment.
-	if isPathLikeQuery(lower) {
+	if pathLike {
 		return "(" + strings.Join(parts, " OR ") + ")"
 	}
 	return strings.Join(parts, " AND ")
@@ -94,7 +92,6 @@ func looksLikeSolrSyntax(q string) bool {
 	if strings.HasPrefix(q, "{!") {
 		return true
 	}
-	// Path-like queries with { } are NOT Solr syntax — we handle those ourselves.
 	if isPathLikeQuery(q) {
 		return false
 	}
@@ -111,7 +108,6 @@ func looksLikeSolrSyntax(q string) bool {
 	return false
 }
 
-// escapeLuceneTerm escapes Lucene special chars for a single wildcard term body.
 func escapeLuceneTerm(s string) string {
 	var b strings.Builder
 	b.Grow(len(s) + 8)

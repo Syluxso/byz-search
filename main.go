@@ -194,7 +194,11 @@ func handleSearch(w http.ResponseWriter, r *http.Request, solr *SolrClient, pub 
 			DurationMs:     durationMs,
 			Status:         http.StatusBadGateway,
 		})
-		writeErr(w, errBadGateway("solr search failed"))
+		detail := "solr search failed"
+		if msg := err.Error(); msg != "" {
+			detail = truncate(msg, 280)
+		}
+		writeErr(w, errBadGateway(detail))
 		return
 	}
 	if hits == nil {
