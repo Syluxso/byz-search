@@ -80,8 +80,9 @@ func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID strin
 	params.Set("fl", "id,title,content,organization_id,tenant_id,user_id,source,path,tags,score")
 	params.Set("hl", "true")
 	params.Set("hl.fl", fieldBody+","+fieldTitle)
-	params.Set("hl.snippets", "1")
-	params.Set("hl.fragsize", "180")
+	params.Set("hl.snippets", "2")
+	params.Set("hl.fragsize", "280")
+	params.Set("hl.method", "unified")
 	params.Add("fq", fieldOrg+":"+solrEscape(orgID))
 	if tenantID != "" {
 		params.Add("fq", fieldTenant+":"+solrEscape(tenantID))
@@ -124,7 +125,10 @@ func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID strin
 			UserID:         anyString(doc[fieldUser]),
 			Tags:           anyStringSlice(doc[fieldTags]),
 		}
+		body := anyString(doc[fieldBody])
+		title := anyString(doc[fieldTitle])
 		if hl := parsed.Highlighting[id]; hl != nil {
+			// Prefer body highlights so Admin shows matching document text.
 			if snips := hl[fieldBody]; len(snips) > 0 {
 				hit.Snippet = snips[0]
 			} else if snips := hl[fieldTitle]; len(snips) > 0 {
@@ -132,7 +136,10 @@ func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID strin
 			}
 		}
 		if hit.Snippet == "" {
-			hit.Snippet = truncate(anyString(doc[fieldBody]), 180)
+			hit.Snippet = snippetAround(body, q, 220)
+		}
+		if hit.Snippet == "" {
+			hit.Snippet = truncate(firstNonEmpty(body, title), 220)
 		}
 		hits = append(hits, hit)
 	}
@@ -207,4 +214,57 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// snippetAround returns a window of text around the first case-insensitive match
+// of any query token, wrapping the match in <em> for Admin rendering.
+func snippetAround(text, rawQ string, window int) string {
+	text = strings.TrimSpace(text)
+	if text == "" || window < 40 {
+		return ""
+	}
+	lower := strings.ToLower(text)
+	var match string
+	var idx int = -1
+	for _, tok := range strings.Fields(strings.ToLower(strings.TrimSpace(rawQ))) {
+		tok = strings.Trim(tok, `*?"'`)
+		if len(tok) < 2 {
+			continue
+		}
+		if i := strings.Index(lower, tok); i >= 0 {
+			match = text[i : i+len(tok)]
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ""
+	}
+	pad := window / 2
+	start := idx - pad
+	if start < 0 {
+		start = 0
+	}
+	end := idx + len(match) + pad
+	if end > len(text) {
+		end = len(text)
+	}
+	prefix := ""
+	if start > 0 {
+		prefix = "…"
+	}
+	suffix := ""
+	if end < len(text) {
+		suffix = "…"
+	}
+	return prefix + text[start:idx] + "<em>" + match + "</em>" + text[idx+len(match):end] + suffix
 }
