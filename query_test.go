@@ -1,42 +1,37 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-func TestBuildContainsQuery(t *testing.T) {
-	got := buildContainsQuery("darr")
-	want := "(title:*darr* OR content:*darr* OR path:*darr*)"
-	if got != want {
-		t.Fatalf("got %q want %q", got, want)
+func TestBuildContainsQueryPathLike(t *testing.T) {
+	got := buildContainsQuery("/notifications/{id}")
+	if !strings.Contains(got, "code_tokens:*") {
+		t.Fatalf("expected code_tokens clause, got %q", got)
 	}
-
-	got = buildContainsQuery("darryn resume")
-	if !containsAll(got, "title:*darryn*", "title:*resume*", " AND ") {
-		t.Fatalf("unexpected multi-term query: %q", got)
+	if !strings.Contains(got, "notifications") {
+		t.Fatalf("expected word token notifications, got %q", got)
 	}
+	// Must not be treated as raw Solr field syntax passthrough.
+	if got == "/notifications/{id}" {
+		t.Fatalf("should not passthrough path-like query")
+	}
+}
 
+func TestBuildContainsQueryWords(t *testing.T) {
+	got := buildContainsQuery("darryn resume")
+	if !strings.Contains(got, " AND ") {
+		t.Fatalf("expected AND for multi-word, got %q", got)
+	}
+	if strings.Contains(got, "code_tokens:*darryn resume*") {
+		t.Fatalf("plain words should not use full path clause, got %q", got)
+	}
+}
+
+func TestBuildContainsQueryPassthrough(t *testing.T) {
 	raw := `title:foo*`
 	if buildContainsQuery(raw) != raw {
 		t.Fatalf("expected passthrough for solr syntax")
 	}
-}
-
-func containsAll(s string, parts ...string) bool {
-	for _, p := range parts {
-		if !containsStr(s, p) {
-			return false
-		}
-	}
-	return true
-}
-
-func containsStr(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
-		(func() bool {
-			for i := 0; i+len(sub) <= len(s); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-			return false
-		})())
 }

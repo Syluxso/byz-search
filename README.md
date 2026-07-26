@@ -62,6 +62,7 @@ Create collection `byz` (or set `SOLR_COLLECTION`) with fields:
 | `id` | string | document id (file id, etc.) |
 | `title` | text | |
 | `content` | text | full text for search + highlighting |
+| `code_tokens` | strings (multi) | path/API snippets e.g. `/notifications/{id}` |
 | `organization_id` | string | **required** filter |
 | `tenant_id` | string | optional |
 | `user_id` | string | optional |
@@ -69,12 +70,21 @@ Create collection `byz` (or set `SOLR_COLLECTION`) with fields:
 | `path` | string | display path |
 | `tags` | strings | multi-valued ok |
 
-Example (managed schema via Solr API or configset) — keep names exact so Ingest and Search stay aligned.
+One-time (if schemaless did not create `code_tokens` as multi-string):
+
+```bash
+curl -s -X POST 'http://127.0.0.1:8983/solr/byz/schema' \
+  -H 'Content-type: application/json' \
+  -d '{"add-field":{"name":"code_tokens","type":"strings","stored":true,"indexed":true,"multiValued":true}}'
+```
+
+Re-index (re-upload or republish `search.index`) after adding the field / deploying ingest.
 
 ## Query behavior
 
-Plain queries are treated as **contains** matches over `title`, `content`, and `path`
-(`*term*`, `allowLeadingWildcard`). Explicit Solr syntax (`*`, `:`, `AND`, …) is passed through.
+- Plain words → contains on `title` / `content` / `path` / `code_tokens`
+- Path-like (`/`, `{`, `}`) → also substring-match on `code_tokens` (tokenization-safe)
+- Explicit Solr syntax (`*`, `:`, `AND`, …) is passed through (except path-like `{…}` queries)
 
 Optional query params:
 
