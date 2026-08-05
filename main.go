@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	defaultMaxSize = 50
-	defaultSize    = 20
+	defaultMaxSize     = 50
+	defaultSize        = 20
+	defaultDocMaxChars = 200_000
 )
 
 func main() {
@@ -31,6 +32,10 @@ func main() {
 	maxSize := envInt("SEARCH_MAX_SIZE", defaultMaxSize)
 	if maxSize < 1 {
 		maxSize = defaultMaxSize
+	}
+	docMaxChars := envInt("DOCUMENT_MAX_CHARS", defaultDocMaxChars)
+	if docMaxChars < 10_000 {
+		docMaxChars = 10_000
 	}
 
 	logs := NewLogBuffer()
@@ -54,7 +59,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/actuator/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusOK
-		body := map[string]any{"status": "UP"}
+		body := map[string]any{"status": "UP", "documentMaxChars": docMaxChars}
 		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		if err := solr.Ping(pingCtx); err != nil {
@@ -75,6 +80,11 @@ func main() {
 		handleSearch(w, r, solr, publisher, maxSize)
 	})))
 
+	// Full indexed body for one doc (agent get_document). List search stays snippet-only.
+	mux.HandleFunc("GET /api/v1/documents/{id}", withCORS(withJWT(jwks, func(w http.ResponseWriter, r *http.Request) {
+		handleGetDocument(w, r, solr, r.PathValue("id"), docMaxChars)
+	})))
+
 	mux.HandleFunc("/api/v1/admin/logs", withCORS(withJWT(jwks, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -92,7 +102,8 @@ func main() {
 	addr := bind + ":" + port
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
-		log.Printf("byz-search listening on http://%s solr=%s/%s kafka=%v", addr, solrURL, collection, kafkaEnabled)
+		log.Printf("byz-search listening on http://%s solr=%s/%s kafka=%v docMaxChars=%d",
+			addr, solrURL, collection, kafkaEnabled, docMaxChars)
 		logs.Add("INFO", "byz-search", "listening on "+addr, nil)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http: %v", err)
@@ -145,25 +156,45 @@ func handleSearch(w http.ResponseWriter, r *http.Request, solr *SolrClient, pub 
 		size = maxSize
 	}
 
+	// Platform admin (BYZ_ADMIN_ORGANIZATION_ID): can search on behalf of another org
+	// (used by byz-agent with client_credentials). Empty admin org = allow override (local/dev).
+	adminOrg := strings.TrimSpace(env("BYZ_ADMIN_ORGANIZATION_ID", ""))
+	isPlatformAdmin := adminOrg == "" || claims.OrganizationID == adminOrg
+
+	orgID := claims.OrganizationID
+	if v := strings.TrimSpace(r.URL.Query().Get("organizationId")); v != "" {
+		if !isPlatformAdmin {
+			writeErr(w, errForbidden("organizationId override requires platform admin org"))
+			return
+		}
+		orgID = v
+	}
+
 	// Tenant filter is opt-in via query param only. Admin uploads often have
 	// null tenant_id; auto-filtering by JWT tenant would hide those docs.
+	// Platform admin may pass any tenant (agent scopes from the chat run).
 	tenantFilter := ""
 	if v := strings.TrimSpace(r.URL.Query().Get("tenantId")); v != "" {
-		if claims.TenantID != "" && v != claims.TenantID {
+		if !isPlatformAdmin && claims.TenantID != "" && v != claims.TenantID {
 			writeErr(w, errForbidden("tenantId does not match token"))
 			return
 		}
 		tenantFilter = v
 	}
 
-	orgID := claims.OrganizationID
-	if v := strings.TrimSpace(r.URL.Query().Get("organizationId")); v != "" {
-		adminOrg := strings.TrimSpace(env("BYZ_ADMIN_ORGANIZATION_ID", ""))
-		if adminOrg != "" && claims.OrganizationID != adminOrg {
-			writeErr(w, errForbidden("organizationId override requires platform admin org"))
+	// Optional user visibility: shared (no user_id) OR owned by this user.
+	// Non-admin may only set userId to themselves (sub or user_id claim).
+	userFilter := ""
+	if v := strings.TrimSpace(r.URL.Query().Get("userId")); v != "" {
+		self := claims.UserID
+		if self == "" {
+			self = claims.Subject
+		}
+		if !isPlatformAdmin && self != "" && v != self {
+			writeErr(w, errForbidden("userId does not match token subject"))
 			return
 		}
-		orgID = v
+		userFilter = v
 	}
 
 	requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
@@ -173,7 +204,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request, solr *SolrClient, pub 
 	w.Header().Set("X-Request-Id", requestID)
 
 	started := time.Now()
-	total, hits, err := solr.Search(r.Context(), q, orgID, tenantFilter, page, size)
+	total, hits, err := solr.Search(r.Context(), q, orgID, tenantFilter, userFilter, page, size)
 	durationMs := time.Since(started).Milliseconds()
 	if err != nil {
 		log.Printf("solr search: %v", err)
@@ -231,5 +262,79 @@ func handleSearch(w http.ResponseWriter, r *http.Request, solr *SolrClient, pub 
 		HitCount:       len(hits),
 		DurationMs:     durationMs,
 		Status:         http.StatusOK,
+	})
+}
+
+func handleGetDocument(w http.ResponseWriter, r *http.Request, solr *SolrClient, id string, maxChars int) {
+	claims, ok := claimsFrom(r.Context())
+	if !ok {
+		writeProblem(w, http.StatusUnauthorized, "Unauthorized", "missing claims")
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		writeErr(w, errBadRequest("document id required"))
+		return
+	}
+
+	adminOrg := strings.TrimSpace(env("BYZ_ADMIN_ORGANIZATION_ID", ""))
+	isPlatformAdmin := adminOrg == "" || claims.OrganizationID == adminOrg
+
+	orgID := claims.OrganizationID
+	if v := strings.TrimSpace(r.URL.Query().Get("organizationId")); v != "" {
+		if !isPlatformAdmin {
+			writeErr(w, errForbidden("organizationId override requires platform admin org"))
+			return
+		}
+		orgID = v
+	}
+
+	userFilter := ""
+	if v := strings.TrimSpace(r.URL.Query().Get("userId")); v != "" {
+		self := claims.UserID
+		if self == "" {
+			self = claims.Subject
+		}
+		if !isPlatformAdmin && self != "" && v != self {
+			writeErr(w, errForbidden("userId does not match token subject"))
+			return
+		}
+		userFilter = v
+	}
+
+	doc, err := solr.GetByID(r.Context(), id, orgID, userFilter)
+	if err != nil {
+		log.Printf("solr get document id=%s: %v", id, err)
+		writeErr(w, errBadGateway("solr document fetch failed"))
+		return
+	}
+	if doc == nil {
+		writeErr(w, errNotFound("document not found in scope"))
+		return
+	}
+
+	content := anyString(doc[fieldBody])
+	contentChars := len([]rune(content))
+	truncated := false
+	if maxChars > 0 && contentChars > maxChars {
+		runes := []rune(content)
+		content = string(runes[:maxChars])
+		truncated = true
+		contentChars = maxChars
+	}
+
+	writeJSON(w, http.StatusOK, DocumentResponse{
+		ID:             anyString(doc[fieldID]),
+		Title:          anyString(doc[fieldTitle]),
+		Source:         anyString(doc[fieldSource]),
+		Path:           anyString(doc[fieldPath]),
+		OrganizationID: anyString(doc[fieldOrg]),
+		TenantID:       anyString(doc[fieldTenant]),
+		UserID:         anyString(doc[fieldUser]),
+		Tags:           anyStringSlice(doc[fieldTags]),
+		Content:        content,
+		ContentChars:   contentChars,
+		Truncated:      truncated,
+		MaxChars:       maxChars,
 	})
 }

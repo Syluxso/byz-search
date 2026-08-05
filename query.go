@@ -12,7 +12,8 @@ const fieldCodeTokens = "code_tokens"
 // (needed when Solr has not defined the code_tokens field yet).
 func buildContainsQuery(raw string, useCodeTokens bool) string {
 	q := strings.TrimSpace(raw)
-	if q == "" {
+	if q == "" || q == "*" || q == "*:*" {
+		// Match-all within org filters (agent “how many docs do I have?”).
 		return "*:*"
 	}
 	if looksLikeSolrSyntax(q) {

@@ -68,21 +68,66 @@ type solrSelectResponse struct {
 	Highlighting map[string]map[string][]string `json:"highlighting"`
 }
 
-func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID string, page, size int) (total int64, hits []SearchHit, err error) {
+// GetByID returns one document's stored fields within org (+ optional user visibility).
+// Returns (nil, nil) when no matching doc (caller maps to 404).
+func (s *SolrClient) GetByID(ctx context.Context, id, orgID, userID string) (map[string]any, error) {
+	id = strings.TrimSpace(id)
+	orgID = strings.TrimSpace(orgID)
+	if id == "" || orgID == "" {
+		return nil, fmt.Errorf("id and organizationId required")
+	}
+	params := url.Values{}
+	params.Set("wt", "json")
+	params.Set("q", fieldID+":"+solrEscape(id))
+	params.Set("rows", "1")
+	params.Set("fl", "id,title,content,organization_id,tenant_id,user_id,source,path,tags")
+	params.Add("fq", fieldOrg+":"+solrEscape(orgID))
+	if userID != "" {
+		params.Add("fq", fmt.Sprintf("(*:* -%s:[* TO *]) OR %s:%s", fieldUser, fieldUser, solrEscape(userID)))
+	}
+
+	u := fmt.Sprintf("%s/solr/%s/select?%s", s.base, url.PathEscape(s.collection), params.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("solr select status %d: %s", resp.StatusCode, truncate(string(body), 600))
+	}
+	var parsed solrSelectResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("solr decode: %w", err)
+	}
+	if len(parsed.Response.Docs) == 0 {
+		return nil, nil
+	}
+	return parsed.Response.Docs[0], nil
+}
+
+func (s *SolrClient) Search(ctx context.Context, q string, orgID, tenantID, userID string, page, size int) (total int64, hits []SearchHit, err error) {
 	// Prefer code_tokens for path-like queries; if Solr schema lacks the field (400),
 	// retry without it so normal search keeps working.
 	luceneQ := buildContainsQuery(q, true)
-	total, hits, err = s.searchWithQuery(ctx, luceneQ, q, orgID, tenantID, page, size)
+	total, hits, err = s.searchWithQuery(ctx, luceneQ, q, orgID, tenantID, userID, page, size)
 	if err != nil && strings.Contains(err.Error(), "status 400") && strings.Contains(luceneQ, fieldCodeTokens) {
 		fallback := buildContainsQuery(q, false)
 		if fallback != luceneQ {
-			return s.searchWithQuery(ctx, fallback, q, orgID, tenantID, page, size)
+			return s.searchWithQuery(ctx, fallback, q, orgID, tenantID, userID, page, size)
 		}
 	}
 	return total, hits, err
 }
 
-func (s *SolrClient) searchWithQuery(ctx context.Context, luceneQ, rawQ, orgID, tenantID string, page, size int) (total int64, hits []SearchHit, err error) {
+func (s *SolrClient) searchWithQuery(ctx context.Context, luceneQ, rawQ, orgID, tenantID, userID string, page, size int) (total int64, hits []SearchHit, err error) {
 	params := url.Values{}
 	params.Set("wt", "json")
 	// Leading wildcards required for "contains" (*term*).
@@ -97,8 +142,13 @@ func (s *SolrClient) searchWithQuery(ctx context.Context, luceneQ, rawQ, orgID, 
 	params.Set("hl.fragsize", "280")
 	params.Set("hl.method", "unified")
 	params.Add("fq", fieldOrg+":"+solrEscape(orgID))
+	// Tenant: matching tenant OR no tenant (many uploads leave tenant_id empty).
 	if tenantID != "" {
-		params.Add("fq", fieldTenant+":"+solrEscape(tenantID))
+		params.Add("fq", fmt.Sprintf("(*:* -%s:[* TO *]) OR %s:%s", fieldTenant, fieldTenant, solrEscape(tenantID)))
+	}
+	// Personal + shared: docs with no user_id (org/tenant-wide) OR owned by this user.
+	if userID != "" {
+		params.Add("fq", fmt.Sprintf("(*:* -%s:[* TO *]) OR %s:%s", fieldUser, fieldUser, solrEscape(userID)))
 	}
 
 	u := fmt.Sprintf("%s/solr/%s/select?%s", s.base, url.PathEscape(s.collection), params.Encode())

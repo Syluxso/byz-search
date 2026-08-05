@@ -38,6 +38,22 @@ type SearchResponse struct {
 	Hits       []SearchHit `json:"hits"`
 }
 
+// DocumentResponse is the full indexed body for one Solr doc (agent get_document).
+type DocumentResponse struct {
+	ID             string   `json:"id"`
+	Title          string   `json:"title,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	Path           string   `json:"path,omitempty"`
+	OrganizationID string   `json:"organizationId,omitempty"`
+	TenantID       string   `json:"tenantId,omitempty"`
+	UserID         string   `json:"userId,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Content        string   `json:"content"`
+	ContentChars   int      `json:"contentChars"`
+	Truncated      bool     `json:"truncated"`
+	MaxChars       int      `json:"maxChars"`
+}
+
 // SearchQueryEvent is emitted on byz.search.query after each search.
 type SearchQueryEvent struct {
 	EventID        string `json:"eventId"`

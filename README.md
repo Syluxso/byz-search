@@ -12,20 +12,43 @@ No database. Saved searches live in clients / profile services.
 
 ## API
 
+### Search (snippets)
+
 ```http
 GET /api/v1/search?q=invoice&page=0&size=20
 Authorization: Bearer <IAM JWT>
 ```
 
-Optional: `tenantId` (must match token `tenant_id` when the token has one).
+List results return **snippets only** (not full bodies).
 
-Requires JWT claim `organization_id`. Search always applies:
+### Document (full indexed text)
 
-```text
-fq=organization_id:"<org from token>"
+```http
+GET /api/v1/documents/{id}?organizationId=<org>&userId=<user>
+Authorization: Bearer <IAM JWT>
 ```
 
-and optionally `tenant_id` when present.
+Returns the full Solr-stored `content` field for one document (extracted text at index time).  
+Capped by `DOCUMENT_MAX_CHARS` (default 200000); response includes `truncated`.  
+Same org/admin override and optional user visibility as search (shared-or-mine when `userId` set).
+
+Optional query params:
+
+| Param | Notes |
+|-------|--------|
+| `tenantId` | Opt-in tenant filter. Non-admin: must match token `tenant_id` if present. Platform admin (see below) may pass any. |
+| `organizationId` | Search as this org. Only platform admin (or unset `BYZ_ADMIN_ORGANIZATION_ID` in local/dev). |
+| `userId` | Visibility: docs with **no** `user_id` (shared) **or** `user_id` = this user. Non-admin may only use self. |
+
+Requires JWT claim `organization_id`. Solr always applies:
+
+```text
+fq=organization_id:"<org from token or organizationId override>"
+```
+
+and optionally `tenant_id` / user visibility filters when present.
+
+**Platform admin / byz-agent:** set `BYZ_ADMIN_ORGANIZATION_ID` to the Byzantine platform org UUID. The `byz-agent` confidential client lives in that org; agent passes the chat run’s org (and tenant/user) so multi-tenant search is correct.
 
 ### Response
 
@@ -86,13 +109,6 @@ Re-index (re-upload or republish `search.index`) after adding the field / deploy
 - Path-like (`/`, `{`, `}`) → also substring-match on `code_tokens` (tokenization-safe)
 - Explicit Solr syntax (`*`, `:`, `AND`, …) is passed through (except path-like `{…}` queries)
 
-Optional query params:
-
-| Param | Notes |
-|-------|--------|
-| `tenantId` | Opt-in tenant filter (not applied from JWT by default) |
-| `organizationId` | Platform-admin override when `BYZ_ADMIN_ORGANIZATION_ID` matches token org (or unset in dev) |
-
 ## Analytics
 
 Each search (success or Solr failure) best-effort publishes `search.query` to **`byz.search.query`** (key = `organizationId`).
@@ -118,6 +134,8 @@ Contract: `projects/events-service/docs/EVENTS.md`.
 | `BYZ_KAFKA_ENABLED` | `true` |
 | `KAFKA_TOPIC_SEARCH_QUERY` | `byz.search.query` |
 | `SEARCH_MAX_SIZE` | `50` |
+| `BYZ_ADMIN_ORGANIZATION_ID` | empty = allow org override (local); set to Byz org UUID in prod for agent |
+| `DOCUMENT_MAX_CHARS` | `200000` — max body length on `GET /api/v1/documents/{id}` |
 
 ## Run
 

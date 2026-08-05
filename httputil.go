@@ -19,6 +19,7 @@ func errUnauthorized(detail string) error {
 	return &httpError{status: 401, detail: detail}
 }
 func errForbidden(detail string) error  { return &httpError{status: 403, detail: detail} }
+func errNotFound(detail string) error   { return &httpError{status: 404, detail: detail} }
 func errBadGateway(detail string) error { return &httpError{status: 502, detail: detail} }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
